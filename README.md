@@ -135,6 +135,134 @@ https://api.openai.com/v1
 
 ## 🤖 Agent / 开发者版教程
 
+### Agent 部署流程
+
+以下流程适用于“宿主机运行 Codex CLI + Docker 运行 AstrBot”的部署方式。桥接服务必须运行在能访问 Codex OAuth 凭据的宿主机上，不能把 OAuth 目录直接暴露给 AstrBot 容器。
+
+#### 1. 准备目录与代码
+
+```bash
+export ASTRBOT_ROOT=/opt/astrbot
+git clone https://github.com/HosisoraLing/astrbot_plugin_gpt_image.git \
+  "$ASTRBOT_ROOT/data/plugins/astrbot_plugin_gpt_image"
+mkdir -p "$ASTRBOT_ROOT/data/plugin_data/astrbot_plugin_gpt_image"
+```
+
+如果 AstrBot 已经安装，只需把插件目录复制到现有的 `data/plugins/` 下。
+
+#### 2. 安装并验证 Codex CLI
+
+在宿主机安装官方 Codex CLI，并使用拥有 ChatGPT/Codex 订阅的账号登录：
+
+```bash
+codex login
+codex login status
+codex --version
+```
+
+确认 `codex login status` 显示已登录。`CODEX_HOME` 目录应由运行桥接服务的同一用户可读。
+
+#### 3. 配置桥接服务
+
+复制 unit 文件后，修改其中的三个环境变量。下面示例假设 Codex 安装在 `/root/.local/bin/codex`：
+
+```bash
+sudo cp "$ASTRBOT_ROOT/data/plugins/astrbot_plugin_gpt_image/bridge/astrbot-codex-image-bridge.service" \
+  /etc/systemd/system/astrbot-codex-image-bridge.service
+sudoedit /etc/systemd/system/astrbot-codex-image-bridge.service
+```
+
+```ini
+Environment=ASTRBOT_GPT_IMAGE_DATA_DIR=/opt/astrbot/data/plugin_data/astrbot_plugin_gpt_image
+Environment=CODEX_BIN=/root/.local/bin/codex
+Environment=CODEX_HOME=/root/.codex
+ExecStart=/usr/bin/python3 /opt/astrbot/data/plugins/astrbot_plugin_gpt_image/bridge/codex_image_bridge.py
+```
+
+如果 Codex 和 AstrBot 不在 `/root` 或 `/opt/astrbot`，必须替换为实际路径。然后启动：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now astrbot-codex-image-bridge.service
+sudo systemctl status astrbot-codex-image-bridge.service
+```
+
+服务启动后应生成以下 socket：
+
+```text
+/opt/astrbot/data/plugin_data/astrbot_plugin_gpt_image/codex_bridge.sock
+```
+
+#### 4. 配置 Docker 挂载
+
+宿主机的插件数据目录必须和容器内路径对应。Docker Compose 示例：
+
+```yaml
+services:
+  astrbot:
+    volumes:
+      - /opt/astrbot/data:/AstrBot/data
+```
+
+至少要保证下面这组路径一致：
+
+```text
+宿主机：/opt/astrbot/data/plugin_data/astrbot_plugin_gpt_image
+容器内：/AstrBot/data/plugin_data/astrbot_plugin_gpt_image
+```
+
+然后在插件配置中使用容器内 socket 路径：
+
+```json
+{
+  "backend": "codex_subscription",
+  "codex_bridge_socket": "/AstrBot/data/plugin_data/astrbot_plugin_gpt_image/codex_bridge.sock",
+  "enable_command": true,
+  "enable_llm_tool": true
+}
+```
+
+重启 AstrBot：
+
+```bash
+docker compose restart astrbot
+```
+
+#### 5. 端到端验证
+
+按以下顺序检查：
+
+```bash
+# 宿主机：socket 和桥接服务
+test -S "$ASTRBOT_ROOT/data/plugin_data/astrbot_plugin_gpt_image/codex_bridge.sock"
+systemctl is-active astrbot-codex-image-bridge.service
+
+# 容器：必须能看到同一个 socket
+docker exec astrbot test -S /AstrBot/data/plugin_data/astrbot_plugin_gpt_image/codex_bridge.sock
+
+# AstrBot：确认两个工具注册
+docker compose logs --since=2m astrbot | grep -E 'generate_gpt_image|edit_gpt_image'
+```
+
+日志中应出现 `Added llm tool: generate_gpt_image` 和 `Added llm tool: edit_gpt_image`。完成后在聊天中发送一条简单的“画一张……”进行首次验证；Codex 搜索和生成可能需要几分钟。
+
+#### 6. 升级与回滚
+
+升级前先备份插件数据中的 session 映射和生成图片：
+
+```bash
+cp -a "$ASTRBOT_ROOT/data/plugin_data/astrbot_plugin_gpt_image" \
+  "$ASTRBOT_ROOT/data/plugin_data/astrbot_plugin_gpt_image.backup"
+git -C "$ASTRBOT_ROOT/data/plugins/astrbot_plugin_gpt_image" pull --ff-only
+python -m py_compile \
+  "$ASTRBOT_ROOT/data/plugins/astrbot_plugin_gpt_image/main.py" \
+  "$ASTRBOT_ROOT/data/plugins/astrbot_plugin_gpt_image/bridge/codex_image_bridge.py"
+sudo systemctl restart astrbot-codex-image-bridge.service
+docker compose restart astrbot
+```
+
+如果升级后异常，使用 `git log --oneline` 找到上一版本并执行 `git checkout <commit>`，然后重新执行语法检查和两个服务的重启。不要删除 `codex_sessions.json`，否则旧图片无法继续对应 Codex session。
+
 ### 工具契约
 
 #### `generate_gpt_image`
