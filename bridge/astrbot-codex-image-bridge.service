@@ -1,0 +1,21 @@
+[Unit]
+Description=AstrBot Codex Subscription Image Bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/environment
+# Edit these paths for your AstrBot installation before enabling the unit.
+Environment=ASTRBOT_GPT_IMAGE_DATA_DIR=/root/astrbot/data/plugin_data/astrbot_plugin_gpt_image
+Environment=CODEX_BIN=/root/.local/bin/codex
+Environment=CODEX_HOME=/root/.codex
+ExecStart=/usr/bin/python3 /root/astrbot/data/plugins/astrbot_plugin_gpt_image/bridge/codex_image_bridge.py
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

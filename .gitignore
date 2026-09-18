@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.env
+.env.*
+*.log
+
+# Runtime state and generated media
+codex_bridge.sock
+codex_sessions.json
+generated/
+inputs/
+bridge_jobs/
+data/
+
+# Local editor/OS files
+.DS_Store
+.idea/
+.vscode/

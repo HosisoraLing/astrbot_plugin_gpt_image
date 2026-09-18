@@ -1,0 +1,120 @@
+{
+  "backend": {
+    "type": "string",
+    "description": "生图后端",
+    "hint": "codex_subscription 使用宿主机 ChatGPT/Codex 订阅；openai_api 使用 API Key",
+    "default": "codex_subscription",
+    "options": ["codex_subscription", "openai_api"]
+  },
+  "codex_bridge_socket": {
+    "type": "string",
+    "description": "Codex 订阅桥 Socket",
+    "hint": "Docker 内路径，通常无需修改",
+    "default": "/AstrBot/data/plugin_data/astrbot_plugin_gpt_image/codex_bridge.sock"
+  },
+  "api_key": {
+    "type": "string",
+    "description": "OpenAI API Key",
+    "hint": "用于 GPT Image 2.5；也可通过容器环境变量 OPENAI_API_KEY 提供",
+    "default": "",
+    "obvious_hint": true
+  },
+  "api_base_url": {
+    "type": "string",
+    "description": "API 基础地址",
+    "hint": "官方地址为 https://api.openai.com/v1；兼容以 /v1 或完整 /images/generations 结尾的地址",
+    "default": "https://api.openai.com/v1"
+  },
+  "model": {
+    "type": "string",
+    "description": "GPT Image 2.5 模型",
+    "default": "gpt-image-2.5-sunburst",
+    "options": [
+      "gpt-image-2.5-sunburst",
+      "gpt-image-2.5-flare",
+      "gpt-image-2.5-sunburst-2026-09-08",
+      "gpt-image-2.5-flare-2026-09-08"
+    ]
+  },
+  "size": {
+    "type": "string",
+    "description": "图片尺寸",
+    "default": "1024x1024",
+    "options": ["1024x1024", "1536x1024", "1024x1536", "auto"]
+  },
+  "quality": {
+    "type": "string",
+    "description": "生成质量",
+    "hint": "质量越高，耗时和费用通常越高",
+    "default": "high",
+    "options": ["auto", "low", "medium", "high", "xhigh", "max"]
+  },
+  "output_format": {
+    "type": "string",
+    "description": "输出格式",
+    "default": "png",
+    "options": ["png", "jpeg", "webp"]
+  },
+  "output_compression": {
+    "type": "int",
+    "description": "JPEG/WebP 压缩质量",
+    "hint": "仅 JPEG 和 WebP 生效，范围 0-100",
+    "default": 90,
+    "slider": {"min": 0, "max": 100, "step": 1}
+  },
+  "background": {
+    "type": "string",
+    "description": "背景模式",
+    "hint": "透明背景会自动使用 PNG，避免 JPEG 丢失透明通道",
+    "default": "auto",
+    "options": ["auto", "opaque", "transparent"]
+  },
+  "enable_command": {
+    "type": "bool",
+    "description": "启用 /画图 指令",
+    "default": true
+  },
+  "enable_llm_tool": {
+    "type": "bool",
+    "description": "允许 LLM 主动调用生图工具",
+    "hint": "工具名为 generate_gpt_image",
+    "default": true
+  },
+  "timeout_seconds": {
+    "type": "int",
+    "description": "请求超时秒数",
+    "default": 180,
+    "slider": {"min": 10, "max": 600, "step": 10}
+  },
+  "max_concurrency": {
+    "type": "int",
+    "description": "最大并发生图数",
+    "default": 1,
+    "slider": {"min": 1, "max": 4, "step": 1}
+  },
+  "cooldown_seconds": {
+    "type": "int",
+    "description": "每位用户的请求冷却时间",
+    "default": 10,
+    "slider": {"min": 0, "max": 3600, "step": 1}
+  },
+  "max_prompt_chars": {
+    "type": "int",
+    "description": "提示词最大字符数",
+    "default": 8000,
+    "slider": {"min": 100, "max": 32000, "step": 100}
+  },
+  "max_image_mb": {
+    "type": "int",
+    "description": "接受的最大单图体积（MB）",
+    "default": 20,
+    "slider": {"min": 1, "max": 50, "step": 1}
+  },
+  "keep_generated_files": {
+    "type": "int",
+    "description": "本地保留最近生成图片数",
+    "hint": "旧文件会自动删除；图片不会写入 LLM 历史上下文",
+    "default": 20,
+    "slider": {"min": 1, "max": 500, "step": 1}
+  }
+}
