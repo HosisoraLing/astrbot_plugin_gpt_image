@@ -898,6 +898,158 @@ class GPTImagePlugin(Star):
         ]
         yield event.plain_result("\n".join(lines))
 
+    @filter.command("生图白名单", alias={"gpt白名单"})
+    async def whitelist_command(
+        self, event: AstrMessageEvent, args: GreedyStr = ""
+    ):
+        """管理员管理 GPT Image 白名单。
+
+        用法：/生图白名单 查看|添加 <ID>|删除 <ID>|清空
+             /生图白名单 白名单 开启|关闭
+             /生图白名单 管理员 开启|关闭
+        """
+        try:
+            is_admin = bool(event.is_admin())
+        except Exception:
+            is_admin = False
+        if not is_admin:
+            yield event.plain_result("❌ 只有管理员可以管理 GPT Image 白名单。")
+            return
+
+        text = str(args or "").strip()
+        parts = text.split(maxsplit=1)
+        operation = parts[0].lower() if parts else "查看"
+        aliases = {
+            "list": "查看",
+            "show": "查看",
+            "status": "查看",
+            "add": "添加",
+            "remove": "删除",
+            "del": "删除",
+            "clear": "清空",
+            "whitelist": "白名单",
+            "admin": "管理员",
+            "admin_only": "管理员",
+            "管理员only": "管理员",
+        }
+        operation = aliases.get(operation, operation)
+
+        async def persist_config() -> str | None:
+            """保存访问控制配置，返回错误信息；兼容不同 AstrBot 配置实现。"""
+            try:
+                saver = getattr(self.config, "save_config_async", None)
+                if callable(saver):
+                    await saver()
+                else:
+                    sync_saver = getattr(self.config, "save_config", None)
+                    if callable(sync_saver):
+                        await asyncio.to_thread(sync_saver)
+            except Exception as exc:
+                logger.exception("[GPTImage] 访问控制配置保存失败")
+                return f"❌ 配置已修改但保存失败：{type(exc).__name__}"
+            return None
+
+        def parse_state(value: str) -> bool | None:
+            normalized = str(value or "").strip().lower()
+            if normalized in {"开启", "开", "on", "true", "1", "启用"}:
+                return True
+            if normalized in {"关闭", "关", "off", "false", "0", "停用"}:
+                return False
+            return None
+
+        # 为了方便管理员，直接输入“开启/关闭”默认切换白名单；也支持
+        # “白名单 开启”和“管理员 开启/仅管理员 开启”等显式写法。
+        if operation in {"开启", "关闭", "开", "关", "on", "off", "true", "false", "1", "0", "启用", "停用"}:
+            state = parse_state(operation)
+            self.config["whitelist_enabled"] = bool(state)
+            error = await persist_config()
+            if error:
+                yield event.plain_result(error)
+            else:
+                yield event.plain_result(
+                    f"✅ GPT Image 白名单已{'开启' if state else '关闭'}。"
+                )
+            return
+
+        if operation in {"白名单", "管理员"}:
+            if len(parts) < 2 or not parts[1].strip():
+                target = "白名单" if operation == "白名单" else "仅管理员"
+                yield event.plain_result(f"用法：/生图白名单 {target} 开启|关闭")
+                return
+            state = parse_state(parts[1])
+            if state is None:
+                yield event.plain_result("状态只能是：开启/关闭（或 on/off）。")
+                return
+            config_key = "whitelist_enabled" if operation == "白名单" else "admin_only"
+            self.config[config_key] = state
+            error = await persist_config()
+            if error:
+                yield event.plain_result(error)
+            else:
+                label = "GPT Image 白名单" if config_key == "whitelist_enabled" else "GPT Image 仅管理员模式"
+                yield event.plain_result(f"✅ {label}已{'开启' if state else '关闭'}。")
+            return
+
+        current_raw = self.config.get("whitelist_ids", self.config.get("whitelist", []))
+        if isinstance(current_raw, str):
+            current = [
+                item.strip()
+                for item in current_raw.replace("\n", ",").split(",")
+                if item.strip()
+            ]
+        elif isinstance(current_raw, (list, tuple, set)):
+            current = [str(item).strip() for item in current_raw if str(item).strip()]
+        else:
+            current = []
+        current = list(dict.fromkeys(current))
+
+        if operation == "查看":
+            enabled = "开启" if self.config.get("whitelist_enabled", False) else "关闭"
+            admin_only = "开启" if self.config.get("admin_only", False) else "关闭"
+            body = "、".join(current) if current else "（空）"
+            yield event.plain_result(
+                f"GPT Image 仅管理员：{admin_only}\n"
+                f"GPT Image 白名单：{enabled}\n"
+                f"名单（{len(current)}）：{body}\n"
+                "用法：/生图白名单 添加 <ID> | 删除 <ID> | 清空 | 白名单 开启|关闭 | 管理员 开启|关闭"
+            )
+            return
+        if operation == "清空":
+            current = []
+        elif operation in {"添加", "删除"}:
+            if len(parts) < 2 or not parts[1].strip():
+                yield event.plain_result(
+                    f"用法：/生图白名单 {operation} <用户ID/群组ID/会话来源ID>"
+                )
+                return
+            identifier = parts[1].strip()
+            if operation == "添加":
+                if identifier not in current:
+                    current.append(identifier)
+            elif identifier in current:
+                current.remove(identifier)
+            else:
+                yield event.plain_result(f"白名单中没有：{identifier}")
+                return
+        else:
+            yield event.plain_result(
+                "用法：/生图白名单 查看 | 添加 <ID> | 删除 <ID> | 清空 | 白名单 开启|关闭 | 管理员 开启|关闭"
+            )
+            return
+
+        self.config["whitelist_ids"] = current
+        error = await persist_config()
+        if error:
+            yield event.plain_result(error)
+            return
+
+        if operation == "清空":
+            yield event.plain_result("✅ GPT Image 白名单已清空。")
+        elif operation == "添加":
+            yield event.plain_result(f"✅ 已加入 GPT Image 白名单：{parts[1].strip()}")
+        else:
+            yield event.plain_result(f"✅ 已移出 GPT Image 白名单：{parts[1].strip()}")
+
     async def initialize(self) -> None:
         logger.info(
             "[GPTImage] 插件已加载: backend=%s, model=%s, endpoint=%s",
