@@ -8,6 +8,8 @@
 
 这是一个面向 AstrBot 的 GPT Image 插件。它支持自然语言触发、引用图片改图、Codex 联网查找参考，以及不受 AstrBot LLM Tool 60 秒限制影响的后台生图。
 
+> **AIGC 说明**：本项目使用 AIGC（人工智能生成内容）辅助完成，但已经过人工测试，确认可以正常使用。
+
 ## ✨ 功能
 
 - **Agent 原生调用**：`generate_gpt_image`、`edit_gpt_image`。
