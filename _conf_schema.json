@@ -82,11 +82,10 @@
     "default": false
   },
   "whitelist_ids": {
-    "type": "array",
+    "type": "list",
     "description": "GPT Image 白名单 ID",
     "hint": "例如 [\"123456\"]；支持用户 ID、群组 ID 或完整会话来源 ID",
-    "default": [],
-    "items": {"type": "string"}
+    "default": []
   },
   "enable_command": {
     "type": "bool",
