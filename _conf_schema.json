@@ -69,6 +69,25 @@
     "default": "auto",
     "options": ["auto", "opaque", "transparent"]
   },
+  "admin_only": {
+    "type": "bool",
+    "description": "仅限管理员使用生图和改图",
+    "hint": "开启后只有 AstrBot 判定为管理员的用户可以调用命令和 LLM Tool；白名单不能绕过此限制",
+    "default": false
+  },
+  "whitelist_enabled": {
+    "type": "bool",
+    "description": "启用 GPT Image 白名单",
+    "hint": "管理员默认放行；普通用户可使用用户 ID、群组 ID 或 unified_msg_origin 加入白名单",
+    "default": false
+  },
+  "whitelist_ids": {
+    "type": "array",
+    "description": "GPT Image 白名单 ID",
+    "hint": "例如 [\"123456\"]；支持用户 ID、群组 ID 或完整会话来源 ID",
+    "default": [],
+    "items": {"type": "string"}
+  },
   "enable_command": {
     "type": "bool",
     "description": "启用 /画图 指令",

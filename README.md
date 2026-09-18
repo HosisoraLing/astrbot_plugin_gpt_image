@@ -21,6 +21,7 @@
 - **Session 续接**：改动之前由 Codex 生成的图片时，继续对应 Codex session；映射持久化。
 - **后台任务**：工具立即返回 `accepted`，完成后自动发图，不把 Base64 或图片内容写入上下文。
 - **双后端**：默认 ChatGPT/Codex 订阅，也可切换 OpenAI Images API。
+- **访问控制**：支持白名单和“仅限管理员生图”开关，命令与 LLM Tool 同时生效。
 
 ## 🧭 工作流
 
@@ -93,6 +94,23 @@ codex_bridge_socket = /AstrBot/data/plugin_data/astrbot_plugin_gpt_image/codex_b
 ```
 
 不需要把 Codex OAuth 凭据挂载进 AstrBot 容器；凭据只由宿主机桥接服务使用。
+
+### 访问控制
+
+在插件配置中：
+
+```json
+{
+  "admin_only": false,
+  "whitelist_enabled": true,
+  "whitelist_ids": ["123456789", "group:987654321"]
+}
+```
+
+- `admin_only=true`：仅 AstrBot 判定为管理员的用户可生图/改图，白名单不能绕过此限制。
+- `whitelist_enabled=true`：管理员默认放行，普通用户必须命中 `whitelist_ids`。
+- `whitelist_ids` 支持用户 ID、群组 ID，或完整 `unified_msg_origin`；也支持在配置界面填入逗号分隔字符串。
+- 两个开关都关闭时，不限制访问。
 
 ### 3. 使用方法
 
@@ -270,6 +288,15 @@ docker compose restart astrbot
 
 ### 工具契约
 
+### Agent 访问控制
+
+访问控制在插件内部执行，Agent 不应自行绕过或重复判断：
+
+- `admin_only=true` 时，命令和两个 LLM Tool 对非管理员统一返回 `denied`；
+- `whitelist_enabled=true` 时，插件使用发送者 ID、群组 ID和 `unified_msg_origin` 匹配 `whitelist_ids`；
+- 管理员在白名单模式下默认放行；
+- Agent 收到 `denied` 后应向用户说明权限限制，不要重试或改用另一个生图工具。
+
 #### `generate_gpt_image`
 
 适用于创建新图。`prompt` 应该是**用户讨论后确认的最终请求**，而不是由 AstrBot 主模型自行扩写的完整视觉 prompt。
@@ -369,6 +396,9 @@ journalctl -u astrbot-codex-image-bridge.service -f
 | `cooldown_seconds` | `10` | 单用户冷却时间 |
 | `timeout_seconds` | `180` | API/桥接请求上限 |
 | `keep_generated_files` | `20` | 本地保留的最近图片数 |
+| `admin_only` | `false` | 是否仅允许管理员生图/改图 |
+| `whitelist_enabled` | `false` | 是否启用白名单 |
+| `whitelist_ids` | `[]` | 用户 ID、群组 ID 或会话来源 ID列表 |
 
 完整配置定义见 [`_conf_schema.json`](_conf_schema.json)。
 

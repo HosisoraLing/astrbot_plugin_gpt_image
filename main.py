@@ -41,7 +41,7 @@ class ImageGenerationError(RuntimeError):
     PLUGIN_NAME,
     "Codex",
     "通过 GPT Image 2.5 生成和修改图片，支持指令与 LLM Tool。",
-    "v1.2.0",
+    "v1.3.0",
 )
 class GPTImagePlugin(Star):
     def __init__(
@@ -158,6 +158,43 @@ class GPTImagePlugin(Star):
         if remaining > 0:
             raise ImageGenerationError(f"请求过快，请 {int(remaining) + 1} 秒后再试。")
         self._last_request[sender] = now
+
+    def _access_denial(self, event: AstrMessageEvent) -> str | None:
+        """Return a user-facing denial reason, or None when generation is allowed."""
+        try:
+            is_admin = bool(event.is_admin())
+        except Exception:
+            is_admin = False
+
+        if bool(self.config.get("admin_only", False)) and not is_admin:
+            return "GPT Image 已设置为仅管理员可用。"
+        if is_admin:
+            return None
+        if not bool(self.config.get("whitelist_enabled", False)):
+            return None
+
+        raw_ids = self.config.get("whitelist_ids", self.config.get("whitelist", []))
+        if isinstance(raw_ids, str):
+            allowed = {
+                item.strip()
+                for item in raw_ids.replace("\n", ",").split(",")
+                if item.strip()
+            }
+        elif isinstance(raw_ids, (list, tuple, set)):
+            allowed = {str(item).strip() for item in raw_ids if str(item).strip()}
+        else:
+            allowed = set()
+
+        candidates = {
+            str(event.get_sender_id() or "").strip(),
+            str(event.get_group_id() or "").strip(),
+            str(self._session_key(event)).strip(),
+            str(getattr(event, "unified_msg_origin", "") or "").strip(),
+        }
+        candidates.discard("")
+        if allowed.intersection(candidates):
+            return None
+        return "当前用户/群组不在 GPT Image 白名单中。"
 
     @staticmethod
     def _session_key(event: AstrMessageEvent) -> str:
@@ -605,6 +642,10 @@ class GPTImagePlugin(Star):
         if not bool(self.config.get("enable_command", True)):
             yield event.plain_result("GPT Image 指令已在插件配置中关闭。")
             return
+        denial = self._access_denial(event)
+        if denial:
+            yield event.plain_result(f"❌ {denial}")
+            return
         reference_paths: list[Path] | None = None
         try:
             clean_prompt = self._validate_prompt(str(prompt))
@@ -642,6 +683,10 @@ class GPTImagePlugin(Star):
         """修改当前、引用或上一张生成图片。用法：/改图 <修改要求>"""
         if not bool(self.config.get("enable_command", True)):
             yield event.plain_result("GPT Image 指令已在插件配置中关闭。")
+            return
+        denial = self._access_denial(event)
+        if denial:
+            yield event.plain_result(f"❌ {denial}")
             return
         input_paths: list[Path] | None = None
         session_id: str | None = None
@@ -701,6 +746,11 @@ class GPTImagePlugin(Star):
             return json.dumps(
                 {"status": "error", "message": "GPT Image LLM Tool 已关闭。"},
                 ensure_ascii=False,
+            )
+        denial = self._access_denial(event)
+        if denial:
+            return json.dumps(
+                {"status": "denied", "message": denial}, ensure_ascii=False
             )
         reference_paths: list[Path] | None = None
         try:
@@ -773,6 +823,11 @@ class GPTImagePlugin(Star):
                 {"status": "error", "message": "GPT Image LLM Tool 已关闭。"},
                 ensure_ascii=False,
             )
+        denial = self._access_denial(event)
+        if denial:
+            return json.dumps(
+                {"status": "denied", "message": denial}, ensure_ascii=False
+            )
         input_paths: list[Path] | None = None
         session_id: str | None = None
         try:
@@ -837,6 +892,8 @@ class GPTImagePlugin(Star):
             f"API Key：{'订阅后端无需配置' if self._backend() == 'codex_subscription' else ('已配置' if configured else '未配置')}",
             f"LLM Tool：{'开启' if self.config.get('enable_llm_tool', True) else '关闭'}",
             "改图：已启用（引用图、当前消息图片或本会话上一张生成图）",
+            f"仅管理员：{'开启' if self.config.get('admin_only', False) else '关闭'}",
+            f"白名单：{'开启' if self.config.get('whitelist_enabled', False) else '关闭'}",
             f"后台任务：{len(self._background_tasks)}",
         ]
         yield event.plain_result("\n".join(lines))
