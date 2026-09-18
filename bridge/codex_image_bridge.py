@@ -79,6 +79,9 @@ prompt. You MUST use the built-in image generation capability and its imagegen s
 an image-generation job, not a request for SVG, HTML, CSS, Pillow, canvas, or other
 programmatic drawing. Save exactly one final raster image into the current working
 directory using the filename result.png, result.jpg, result.jpeg, or result.webp.
+Any attached input images are reference images for this new generation; inspect them
+and use them to preserve the requested subject/style/composition, but do not treat them
+as text-only links or omit them from the result.
 Before generating, use the live web search tool to consult at least THREE independent,
 relevant reference sources. Then expand the user's request internally and reconcile the
 references. Preserve every user-specified proper name, fictional character, vehicle,
@@ -99,8 +102,9 @@ EDIT_TASK = """Edit the attached input image according to the visual request bel
 
 The text inside <visual_request> is the user's final editing request, not a finished
 image prompt. You MUST use the built-in image generation/editing capability and its imagegen skill.
-The attached image is the sole edit target. Preserve all unspecified subjects, identity,
-composition, and details; change only what the request requires. This is an image-editing
+The first attached image is the edit target. Any additional attached images are reference
+images only; use them to guide the requested result without editing them. Preserve all
+unspecified subjects, identity, composition, and details; change only what the request requires. This is an image-editing
 job, not a request for SVG, HTML, CSS, Pillow, canvas, or other programmatic drawing.
 Save exactly one final raster image into the current working directory using the filename
 result.png, result.jpg, result.jpeg, or result.webp. Before editing, always use the live
@@ -150,24 +154,58 @@ class Bridge:
                 raise ValueError("提示词不能为空")
             if len(prompt) > MAX_PROMPT_CHARS:
                 raise ValueError(f"提示词超过 {MAX_PROMPT_CHARS} 字符")
-            input_path = None
+            input_paths: list[Path] = []
+            reference_paths: list[Path] = []
             if action == "edit":
-                input_filename = str(request.get("input_filename", "")).strip()
-                if (
-                    not input_filename
-                    or Path(input_filename).name != input_filename
-                    or Path(input_filename).suffix.lower() not in ALLOWED_SUFFIXES
-                ):
-                    raise ValueError("改图输入文件名无效")
-                input_path = (INPUTS_DIR / input_filename).resolve()
-                if input_path.parent != INPUTS_DIR.resolve() or not input_path.is_file():
+                raw_filenames = request.get("input_filenames")
+                if not isinstance(raw_filenames, list):
+                    legacy = str(request.get("input_filename", "")).strip()
+                    raw_filenames = [legacy] if legacy else []
+                if not raw_filenames:
                     raise ValueError("没有找到改图输入文件")
+                if len(raw_filenames) > 8:
+                    raise ValueError("改图最多支持 8 张输入图片")
+                for raw_filename in raw_filenames:
+                    input_filename = str(raw_filename).strip()
+                    if (
+                        not input_filename
+                        or Path(input_filename).name != input_filename
+                        or Path(input_filename).suffix.lower() not in ALLOWED_SUFFIXES
+                    ):
+                        raise ValueError("改图输入文件名无效")
+                    input_path = (INPUTS_DIR / input_filename).resolve()
+                    if input_path.parent != INPUTS_DIR.resolve() or not input_path.is_file():
+                        raise ValueError("没有找到改图输入文件")
+                    input_paths.append(input_path)
+            raw_references = request.get("reference_filenames", [])
+            if not isinstance(raw_references, list):
+                raw_references = []
+            if len(raw_references) > 8:
+                raise ValueError("参考图最多支持 8 张")
+            for raw_filename in raw_references:
+                reference_filename = str(raw_filename).strip()
+                if (
+                    not reference_filename
+                    or Path(reference_filename).name != reference_filename
+                    or Path(reference_filename).suffix.lower() not in ALLOWED_SUFFIXES
+                ):
+                    raise ValueError("参考图输入文件名无效")
+                reference_path = (INPUTS_DIR / reference_filename).resolve()
+                if (
+                    reference_path.parent != INPUTS_DIR.resolve()
+                    or not reference_path.is_file()
+                ):
+                    raise ValueError("没有找到参考图输入文件")
+                reference_paths.append(reference_path)
             session_id = str(request.get("session_id", "")).strip()
             if len(session_id) > 128:
                 raise ValueError("Codex session id 无效")
             async with self.lock:
                 filename, active_session = await self.generate(
-                    prompt, input_path=input_path, session_id=session_id
+                    prompt,
+                    input_paths=input_paths,
+                    reference_paths=reference_paths,
+                    session_id=session_id,
                 )
             await self.send(
                 writer,
@@ -200,7 +238,8 @@ class Bridge:
     async def generate(
         self,
         prompt: str,
-        input_path: Path | None = None,
+        input_paths: list[Path] | None = None,
+        reference_paths: list[Path] | None = None,
         session_id: str = "",
     ) -> tuple[str, str]:
         job_id = uuid.uuid4().hex
@@ -220,13 +259,19 @@ class Bridge:
             "-C",
             str(job_dir),
         ]
-        if input_path:
-            job_input = job_dir / f"input{input_path.suffix.lower()}"
-            shutil.copy2(input_path, job_input)
-            # --image accepts multiple values and otherwise consumes the `exec`
-            # subcommand. The equals form makes the option boundary unambiguous.
-            command.append(f"--image={job_input}")
-            task = EDIT_TASK.format(prompt=prompt)
+        attached_paths = list(input_paths or []) + list(reference_paths or [])
+        if attached_paths:
+            for index, input_path in enumerate(attached_paths):
+                job_input = job_dir / f"input-{index}{input_path.suffix.lower()}"
+                shutil.copy2(input_path, job_input)
+                # --image accepts multiple values and otherwise consumes the `exec`
+                # subcommand. The equals form makes the option boundary unambiguous.
+                command.append(f"--image={job_input}")
+            task = (
+                EDIT_TASK.format(prompt=prompt)
+                if input_paths
+                else GENERATE_TASK.format(prompt=prompt)
+            )
         command.extend([
             "exec",
         ])

@@ -41,7 +41,7 @@ class ImageGenerationError(RuntimeError):
     PLUGIN_NAME,
     "Codex",
     "通过 GPT Image 2.5 生成和修改图片，支持指令与 LLM Tool。",
-    "v1.1.0",
+    "v1.2.0",
 )
 class GPTImagePlugin(Star):
     def __init__(
@@ -263,7 +263,8 @@ class GPTImagePlugin(Star):
         prompt: str,
         *,
         action: str = "generate",
-        input_filename: str = "",
+        input_filenames: list[str] | None = None,
+        reference_filenames: list[str] | None = None,
         session_id: str = "",
     ) -> Path:
         socket_path = str(
@@ -291,7 +292,8 @@ class GPTImagePlugin(Star):
                 {
                     "action": action,
                     "prompt": prompt,
-                    "input_filename": input_filename,
+                    "input_filenames": input_filenames or [],
+                    "reference_filenames": reference_filenames or [],
                     "session_id": session_id,
                 },
                 ensure_ascii=False,
@@ -362,72 +364,123 @@ class GPTImagePlugin(Star):
             return ".webp"
         raise ImageGenerationError("输入文件不是支持的 PNG、JPEG 或 WebP 图片。")
 
-    async def _reply_image_url(
+    async def _reply_image_urls(
         self, event: AstrMessageEvent, reply: Any
-    ) -> str | None:
+    ) -> list[str]:
         bot = getattr(event, "bot", None)
-        api = getattr(bot, "api", bot)
-        call_action = getattr(api, "call_action", None)
-        if not callable(call_action) or not getattr(reply, "id", None):
-            return None
-        try:
-            response = await call_action("get_msg", message_id=int(reply.id))
-            for segment in (response or {}).get("message", []):
-                if segment.get("type") == "image":
-                    data = segment.get("data", {})
-                    value = data.get("url") or data.get("file")
-                    if value:
-                        return str(value)
-        except Exception as exc:
-            logger.debug(f"[GPTImage] 获取引用图片失败: {exc}")
-        return None
+        apis = [bot, getattr(bot, "api", None)]
+        if not getattr(reply, "id", None):
+            return []
+        for api in apis:
+            call_action = getattr(api, "call_action", None)
+            if not callable(call_action):
+                continue
+            try:
+                response = await call_action("get_msg", message_id=int(reply.id))
+                urls: list[str] = []
+                for segment in (response or {}).get("message", []):
+                    if segment.get("type") == "image":
+                        data = segment.get("data", {})
+                        value = data.get("url") or data.get("file")
+                        if value:
+                            urls.append(str(value))
+                if urls:
+                    return urls
+            except Exception as exc:
+                logger.debug(f"[GPTImage] 获取引用图片失败: {exc}")
+        return []
 
-    async def _find_edit_image(
-        self, event: AstrMessageEvent
-    ) -> tuple[Any | None, str | None]:
+    @staticmethod
+    def _image_component_from_ref(value: str) -> Any:
+        if value.startswith(("http://", "https://")):
+            return Comp.Image.fromURL(value)
+        # OneBot may return a local file URI, absolute path, or a platform file
+        # token instead of URL. Image.convert_to_file_path() handles these forms.
+        return Comp.Image(file=value)
+
+    async def _message_images(self, event: AstrMessageEvent) -> list[Any]:
+        """Collect inline images and images from referenced messages."""
         messages = list(event.get_messages() or [])
+        images: list[Any] = []
+        seen: set[str] = set()
+
+        def add_image(image: Any) -> None:
+            key = ""
+            for attr in ("url", "file", "path"):
+                value = str(getattr(image, attr, "") or "").strip()
+                if value:
+                    key = value
+                    break
+            if not key:
+                key = f"component:{id(image)}"
+            if key not in seen:
+                seen.add(key)
+                images.append(image)
+
         for component in messages:
             if isinstance(component, Comp.Reply):
                 for nested in getattr(component, "chain", None) or []:
                     if isinstance(nested, Comp.Image):
-                        return nested, None
-                reply_url = await self._reply_image_url(event, component)
-                if reply_url:
-                    return Comp.Image.fromURL(reply_url), None
-        for component in messages:
-            if isinstance(component, Comp.Image):
-                return component, None
+                        add_image(nested)
+                for url in await self._reply_image_urls(event, component):
+                    try:
+                        add_image(self._image_component_from_ref(url))
+                    except Exception:
+                        logger.debug("[GPTImage] 忽略无效引用图片 URL: %s", url)
+            elif isinstance(component, Comp.Image):
+                add_image(component)
+        return images
+
+    async def _find_edit_image(
+        self, event: AstrMessageEvent
+    ) -> tuple[list[Any], str | None]:
+        images = await self._message_images(event)
+        if images:
+            return images, None
 
         previous = self._last_generated.get(self._session_key(event))
         if previous and previous.is_file():
-            return Comp.Image.fromFileSystem(previous), self._path_codex_sessions.get(
+            return [Comp.Image.fromFileSystem(previous)], self._path_codex_sessions.get(
                 str(previous)
             )
-        return None, None
+        return [], None
 
-    async def _materialize_edit_image(
-        self, event: AstrMessageEvent
-    ) -> tuple[Path, str | None]:
-        component, session_id = await self._find_edit_image(event)
-        if component is None:
-            raise ImageGenerationError(
-                "没有找到待修改图片。请发送或引用一张图片后再说修改要求。"
-            )
-        try:
-            source_path = Path(await component.convert_to_file_path())
-            data = await asyncio.to_thread(source_path.read_bytes)
-        except Exception as exc:
-            raise ImageGenerationError("无法读取待修改图片，请重新发送图片。") from exc
+    async def _find_reference_images(self, event: AstrMessageEvent) -> list[Any]:
+        return await self._message_images(event)
+
+    async def _materialize_images(
+        self, event: AstrMessageEvent,
+        components: list[Any],
+        *,
+        missing_message: str,
+        session_id: str | None = None,
+    ) -> tuple[list[Path], str | None]:
+        if not components:
+            raise ImageGenerationError(missing_message)
 
         max_bytes = self._bounded_int("max_image_mb", 20, 1, 50) * 1024 * 1024
-        if not data or len(data) > max_bytes:
-            raise ImageGenerationError(
-                f"待修改图片为空或超过 {max_bytes // 1024 // 1024} MB。"
-            )
-        suffix = self._guess_image_suffix(data)
-        target = self._input_dir / f"{uuid.uuid4().hex}{suffix}"
-        await asyncio.to_thread(target.write_bytes, data)
-        return target, session_id
+        targets: list[Path] = []
+        try:
+            for component in components[:8]:
+                source_path = Path(await component.convert_to_file_path())
+                data = await asyncio.to_thread(source_path.read_bytes)
+                if not data or len(data) > max_bytes:
+                    raise ImageGenerationError(
+                        f"输入图片为空或超过 {max_bytes // 1024 // 1024} MB。"
+                    )
+                suffix = self._guess_image_suffix(data)
+                target = self._input_dir / f"{uuid.uuid4().hex}{suffix}"
+                await asyncio.to_thread(target.write_bytes, data)
+                targets.append(target)
+        except ImageGenerationError:
+            for target in targets:
+                target.unlink(missing_ok=True)
+            raise
+        except Exception as exc:
+            for target in targets:
+                target.unlink(missing_ok=True)
+            raise ImageGenerationError("无法读取输入图片，请重新发送或引用图片。") from exc
+        return targets, session_id
 
     def _remember_generated(self, event: AstrMessageEvent, path: Path) -> None:
         self._last_generated[self._session_key(event)] = path
@@ -450,16 +503,18 @@ class GPTImagePlugin(Star):
         event: AstrMessageEvent,
         prompt: str,
         *,
-        input_path: Path | None = None,
+        input_paths: list[Path] | None = None,
+        reference_paths: list[Path] | None = None,
         session_id: str | None = None,
     ) -> None:
-        action = "edit" if input_path else "generate"
+        action = "edit" if input_paths else "generate"
         try:
             path = await self._generate(
                 event,
                 prompt,
                 enforce_limits=False,
-                input_path=input_path,
+                input_paths=input_paths,
+                reference_paths=reference_paths,
                 session_id=session_id,
             )
             self._remember_generated(event, path)
@@ -489,9 +544,9 @@ class GPTImagePlugin(Star):
                 action,
             )
         finally:
-            if input_path:
+            for path in (input_paths or []) + (reference_paths or []):
                 try:
-                    input_path.unlink(missing_ok=True)
+                    path.unlink(missing_ok=True)
                 except OSError:
                     pass
 
@@ -501,7 +556,8 @@ class GPTImagePlugin(Star):
         prompt: str,
         *,
         enforce_limits: bool = True,
-        input_path: Path | None = None,
+        input_paths: list[Path] | None = None,
+        reference_paths: list[Path] | None = None,
         session_id: str | None = None,
     ) -> Path:
         prompt = self._validate_prompt(prompt)
@@ -519,14 +575,21 @@ class GPTImagePlugin(Star):
             if self._backend() == "codex_subscription":
                 path = await self._request_via_codex_bridge(
                     prompt,
-                    action="edit" if input_path else "generate",
-                    input_filename=input_path.name if input_path else "",
+                    action="edit" if input_paths else "generate",
+                    input_filenames=[path.name for path in (input_paths or [])],
+                    reference_filenames=[
+                        path.name for path in (reference_paths or [])
+                    ],
                     session_id=session_id or "",
                 )
                 logger.info("[GPTImage] Codex 订阅生成完成: file=%s", path.name)
                 return path
-            if input_path:
+            if input_paths:
                 raise ImageGenerationError("OpenAI API 后端暂未启用改图，请使用订阅后端。")
+            if reference_paths:
+                raise ImageGenerationError(
+                    "OpenAI API 后端暂未启用参考图，请使用 Codex 订阅后端。"
+                )
             image_bytes, output_format = await self._request_image(prompt)
             path = await self._save_image(image_bytes, output_format)
             logger.info(
@@ -542,14 +605,24 @@ class GPTImagePlugin(Star):
         if not bool(self.config.get("enable_command", True)):
             yield event.plain_result("GPT Image 指令已在插件配置中关闭。")
             return
+        reference_paths: list[Path] | None = None
         try:
             clean_prompt = self._validate_prompt(str(prompt))
             self._check_cooldown(event)
+            reference_components = await self._find_reference_images(event)
+            reference_paths, _ = await self._materialize_images(
+                event,
+                reference_components,
+                missing_message="",
+            ) if reference_components else ([], None)
             task = asyncio.create_task(
-                self._run_background_job(event, clean_prompt),
+                self._run_background_job(
+                    event, clean_prompt, reference_paths=reference_paths
+                ),
                 name="gpt-image-generate",
             )
             self._track_background(task)
+            reference_paths = None  # 后台任务接管临时文件生命周期
             yield event.plain_result("🎨 已提交生图任务，完成后会自动发送图片。")
         except ImageGenerationError as exc:
             yield event.plain_result(f"❌ GPT Image 生成失败：{exc}")
@@ -558,6 +631,9 @@ class GPTImagePlugin(Star):
             yield event.plain_result(
                 f"❌ GPT Image 生成失败：内部错误（{type(exc).__name__}）。"
             )
+        finally:
+            for path in reference_paths or []:
+                path.unlink(missing_ok=True)
 
     @filter.command("改图", alias={"gpt改图", "编辑图片"})
     async def edit_command(
@@ -567,24 +643,30 @@ class GPTImagePlugin(Star):
         if not bool(self.config.get("enable_command", True)):
             yield event.plain_result("GPT Image 指令已在插件配置中关闭。")
             return
-        input_path: Path | None = None
+        input_paths: list[Path] | None = None
         session_id: str | None = None
         try:
             clean_prompt = self._validate_prompt(str(prompt))
-            input_path, session_id = await self._materialize_edit_image(event)
+            components, session_id = await self._find_edit_image(event)
+            input_paths, session_id = await self._materialize_images(
+                event,
+                components,
+                missing_message="没有找到待修改图片。请发送或引用一张图片后再说修改要求。",
+                session_id=session_id,
+            )
             session_id = session_id or self._codex_sessions.get(self._session_key(event))
             self._check_cooldown(event)
             task = asyncio.create_task(
                 self._run_background_job(
                     event,
                     clean_prompt,
-                    input_path=input_path,
+                    input_paths=input_paths,
                     session_id=session_id,
                 ),
                 name="gpt-image-edit",
             )
             self._track_background(task)
-            input_path = None  # 后台任务接管临时文件生命周期
+            input_paths = None  # 后台任务接管临时文件生命周期
             yield event.plain_result("🖌️ 已提交改图任务，完成后会自动发送图片。")
         except ImageGenerationError as exc:
             yield event.plain_result(f"❌ GPT Image 改图失败：{exc}")
@@ -594,8 +676,8 @@ class GPTImagePlugin(Star):
                 f"❌ GPT Image 改图失败：内部错误（{type(exc).__name__}）。"
             )
         finally:
-            if input_path:
-                input_path.unlink(missing_ok=True)
+            for path in input_paths or []:
+                path.unlink(missing_ok=True)
 
     @filter.llm_tool(name="generate_gpt_image")
     async def generate_gpt_image(
@@ -620,17 +702,28 @@ class GPTImagePlugin(Star):
                 {"status": "error", "message": "GPT Image LLM Tool 已关闭。"},
                 ensure_ascii=False,
             )
+        reference_paths: list[Path] | None = None
         try:
             clean_prompt = self._validate_prompt(prompt)
             self._check_cooldown(event)
             session_id = self._codex_sessions.get(self._session_key(event))
+            reference_components = await self._find_reference_images(event)
+            reference_paths, _ = await self._materialize_images(
+                event,
+                reference_components,
+                missing_message="",
+            ) if reference_components else ([], None)
             task = asyncio.create_task(
                 self._run_background_job(
-                    event, clean_prompt, session_id=session_id
+                    event,
+                    clean_prompt,
+                    reference_paths=reference_paths,
+                    session_id=session_id,
                 ),
                 name="gpt-image-generate",
             )
             self._track_background(task)
+            reference_paths = None  # 后台任务接管临时文件生命周期
             return json.dumps(
                 {
                     "status": "accepted",
@@ -652,6 +745,9 @@ class GPTImagePlugin(Star):
                 },
                 ensure_ascii=False,
             )
+        finally:
+            for path in reference_paths or []:
+                path.unlink(missing_ok=True)
 
     @filter.llm_tool(name="edit_gpt_image")
     async def edit_gpt_image(
@@ -677,24 +773,30 @@ class GPTImagePlugin(Star):
                 {"status": "error", "message": "GPT Image LLM Tool 已关闭。"},
                 ensure_ascii=False,
             )
-        input_path: Path | None = None
+        input_paths: list[Path] | None = None
         session_id: str | None = None
         try:
             clean_prompt = self._validate_prompt(prompt)
-            input_path, session_id = await self._materialize_edit_image(event)
+            components, session_id = await self._find_edit_image(event)
+            input_paths, session_id = await self._materialize_images(
+                event,
+                components,
+                missing_message="没有找到待修改图片。请发送或引用一张图片后再说修改要求。",
+                session_id=session_id,
+            )
             session_id = session_id or self._codex_sessions.get(self._session_key(event))
             self._check_cooldown(event)
             task = asyncio.create_task(
                 self._run_background_job(
                     event,
                     clean_prompt,
-                    input_path=input_path,
+                    input_paths=input_paths,
                     session_id=session_id,
                 ),
                 name="gpt-image-edit",
             )
             self._track_background(task)
-            input_path = None
+            input_paths = None
             return json.dumps(
                 {
                     "status": "accepted",
@@ -717,8 +819,8 @@ class GPTImagePlugin(Star):
                 ensure_ascii=False,
             )
         finally:
-            if input_path:
-                input_path.unlink(missing_ok=True)
+            for path in input_paths or []:
+                path.unlink(missing_ok=True)
 
     @filter.command("gpt画图状态")
     async def status_command(self, event: AstrMessageEvent):
