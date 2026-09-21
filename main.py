@@ -55,7 +55,6 @@ class GPTImagePlugin(Star):
         self._last_request: dict[str, float] = {}
         self._background_tasks: set[asyncio.Task] = set()
         self._last_generated: dict[str, Path] = {}
-        self._codex_sessions: dict[str, str] = {}
         self._path_codex_sessions: dict[str, str] = {}
         self._data_dir = Path(StarTools.get_data_dir(PLUGIN_NAME)) / "generated"
         self._data_dir.mkdir(parents=True, exist_ok=True)
@@ -555,9 +554,6 @@ class GPTImagePlugin(Star):
                 session_id=session_id,
             )
             self._remember_generated(event, path)
-            bridge_session = self._path_codex_sessions.get(str(path))
-            if bridge_session:
-                self._codex_sessions[self._session_key(event)] = bridge_session
             await self._send_background_result(
                 event,
                 MessageChain([Comp.Image.fromFileSystem(path)]),
@@ -699,7 +695,6 @@ class GPTImagePlugin(Star):
                 missing_message="没有找到待修改图片。请发送或引用一张图片后再说修改要求。",
                 session_id=session_id,
             )
-            session_id = session_id or self._codex_sessions.get(self._session_key(event))
             self._check_cooldown(event)
             task = asyncio.create_task(
                 self._run_background_job(
@@ -756,7 +751,6 @@ class GPTImagePlugin(Star):
         try:
             clean_prompt = self._validate_prompt(prompt)
             self._check_cooldown(event)
-            session_id = self._codex_sessions.get(self._session_key(event))
             reference_components = await self._find_reference_images(event)
             reference_paths, _ = await self._materialize_images(
                 event,
@@ -768,7 +762,6 @@ class GPTImagePlugin(Star):
                     event,
                     clean_prompt,
                     reference_paths=reference_paths,
-                    session_id=session_id,
                 ),
                 name="gpt-image-generate",
             )
@@ -839,7 +832,6 @@ class GPTImagePlugin(Star):
                 missing_message="没有找到待修改图片。请发送或引用一张图片后再说修改要求。",
                 session_id=session_id,
             )
-            session_id = session_id or self._codex_sessions.get(self._session_key(event))
             self._check_cooldown(event)
             task = asyncio.create_task(
                 self._run_background_job(

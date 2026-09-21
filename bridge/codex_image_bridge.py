@@ -371,6 +371,11 @@ class Bridge:
             os.replace(source, GENERATED_DIR / final_name)
             return final_name, active_session
         except asyncio.TimeoutError:
+            LOGGER.warning(
+                "Codex image request timed out after %s seconds; resumed_session=%s",
+                REQUEST_TIMEOUT,
+                bool(session_id),
+            )
             if process and process.returncode is None:
                 os.killpg(process.pid, signal.SIGKILL)
                 await process.wait()
